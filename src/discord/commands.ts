@@ -257,11 +257,12 @@ export async function checkAllWishlists(client: Client): Promise<string[]> {
       if (hits.length === 0) continue;
       const discordUser = await client.users.fetch(user.discordId).catch(() => null);
       if (!discordUser) continue;
-      await discordUser.send(
-        `Woy, skin incaran kamu muncul di shop hari ini!\n` +
-          hits.map((h) => `• **${h.item.name}** — ${h.item.vp !== null ? `${h.item.vp} VP` : '?'}`).join('\n') +
-          `\nCek lengkapnya dengan \`/shop\`. Shop reset dalam ${formatDuration(result.shop.secondsLeft)}.`,
-      );
+      await discordUser.send({
+        content:
+          `Woy, skin incaran kamu muncul di shop hari ini! ` +
+          `Cek lengkapnya dengan \`/shop\`. Shop reset dalam ${formatDuration(result.shop.secondsLeft)}.`,
+        embeds: hits.map((h) => itemEmbed(h.item, {})),
+      });
       notified.push(user.discordId);
     } catch (err) {
       console.error(`[shop-checker] wishlist check gagal untuk ${user.discordId}:`, err);
