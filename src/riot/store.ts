@@ -139,6 +139,8 @@ export interface PdProbe {
   walletVp: number | null;
   mmrStatus: number;
   storefrontStatus: number;
+  storefrontV3Status: number;
+  storefrontV3Keys: string[];
 }
 
 /**
@@ -181,9 +183,27 @@ export async function probePd(
   }
   const mmrStatus = await probe(`/mmr/v1/players/${session.puuid}`);
   const storefrontStatus = await probe(`/store/v2/storefront/${session.puuid}`);
+  // Hipotesis baru: game client 2026 sudah pakai Storefront v3 (bot lain
+  // seperti VAL-13T menyebut "Storefront v3 endpoints"), sementara v2
+  // yang dipakai bot ini mungkin sudah dipensiunkan Riot — makanya v2 404
+  // padahal wallet + MMR (v1) dengan token yang sama balas 200.
+  // Coba v3 dengan header yang sama; kalau 200, catat field atasnya biar
+  // tahu bentuk responsnya sebelum fetchShop dipindah ke v3.
+  let storefrontV3Status = 0;
+  let storefrontV3Keys: string[] = [];
+  try {
+    const v3 = await fetch(`${base}/store/v3/storefront/${session.puuid}`, { headers });
+    storefrontV3Status = v3.status;
+    if (v3.ok) {
+      const data = (await v3.json()) as Record<string, unknown>;
+      storefrontV3Keys = Object.keys(data);
+    }
+  } catch {
+    storefrontV3Status = 0;
+  }
   console.log(
     `[shop-checker] /debug ${session.riotName}#${session.tag} shard=${session.shard} ` +
-      `client=${clientVersion} wallet=${walletStatus} mmr=${mmrStatus} storefront=${storefrontStatus}`,
+      `client=${clientVersion} wallet=${walletStatus} mmr=${mmrStatus} storefront_v2=${storefrontStatus} storefront_v3=${storefrontV3Status} v3keys=[${storefrontV3Keys.join(',')}]`,
   );
   return {
     riotName: session.riotName,
@@ -195,6 +215,8 @@ export async function probePd(
     walletVp,
     mmrStatus,
     storefrontStatus,
+    storefrontV3Status,
+    storefrontV3Keys,
   };
 }
 
