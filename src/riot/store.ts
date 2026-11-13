@@ -93,38 +93,56 @@ export async function fetchShop(
 
   const session: RiotSession = valid.session;
   const clientVersion = await getClientVersion();
-  // Shard yang tersimpan bisa salah (dulu deteksi Riot Geo-nya bug, jadi
-  // selalu fallback ke ap). Storefront di shard yang salah balas 404,
-  // jadi coba shard tersimpan dulu, lalu shard lain sampai ada yang 200.
-  // Kalau ada shard lain yang berhasil, simpan shard itu buat ke depannya.
+  const headers = storefrontHeaders(session, clientVersion);
+  // Storefront v2 (GET) sudah dipensiunkan Riot: balas 404 di semua shard
+  // padahal wallet + MMR dengan token yang sama balas 200. Game client
+  // 2026 pakai Storefront v3, yaitu POST dengan body kosong {} ke
+  // /store/v3/storefront/{puuid} (GET ke v3 balas 405 — rutenya ada tapi
+  // metodenya salah). Bentuk respons v3 sama seperti v2 (SkinsPanelLayout,
+  // SingleItemStoreOffers, BonusStore, FeaturedBundle), jadi parse-nya
+  // tidak berubah. v2 tetap dicoba sebagai fallback per shard.
+  // Shard yang tersimpan bisa salah, jadi coba shard tersimpan dulu, lalu
+  // shard lain sampai ada yang 200. Kalau ada shard lain yang berhasil,
+  // simpan shard itu buat ke depannya.
   const shards = [session.shard, 'ap', 'na', 'eu', 'kr'].filter(
     (s, i, arr) => s && arr.indexOf(s) === i,
   );
   let lastStatus = 0;
   for (const shard of shards) {
-    const url = `https://pd.${shard}.a.pvp.net/store/v2/storefront/${session.puuid}`;
-    const res = await fetch(url, { headers: storefrontHeaders(session, clientVersion) });
-    if (res.status === 401 || res.status === 403) return { error: 'need-login' };
-    if (res.status === 404) {
-      console.log(`[shop-checker] Storefront 404 di shard ${shard}, coba shard lain...`);
-      lastStatus = 404;
-      continue;
+    const base = `https://pd.${shard}.a.pvp.net/store`;
+    const attempts: Array<{ label: string; res: Response }> = [];
+    const v3 = await fetch(`${base}/v3/storefront/${session.puuid}`, {
+      method: 'POST',
+      headers,
+      body: '{}',
+    });
+    attempts.push({ label: 'v3', res: v3 });
+    if (v3.status === 404) {
+      const v2 = await fetch(`${base}/v2/storefront/${session.puuid}`, { headers });
+      attempts.push({ label: 'v2', res: v2 });
     }
-    if (!res.ok) throw new Error(`Gagal ambil shop (${res.status}) di shard ${shard}`);
-    const raw = await res.json();
-    const catalog = await getSkinCatalog();
-    const shop = parseStorefront(raw, catalog);
-    if (shard !== session.shard) {
-      console.log(`[shop-checker] Storefront ketemu di shard ${shard} (bukan ${session.shard}), shard disimpan.`);
-      const updated: UserRecord = { ...valid.user, shard };
-      await upsertUser(updated);
-      return { shop, user: updated };
+    for (const { label, res } of attempts) {
+      if (res.status === 401 || res.status === 403) return { error: 'need-login' };
+      if (res.status === 404) {
+        console.log(`[shop-checker] Storefront ${label} 404 di shard ${shard}, coba shard lain...`);
+        lastStatus = 404;
+        continue;
+      }
+      if (!res.ok) throw new Error(`Gagal ambil shop (${res.status}) di shard ${shard} (${label})`);
+      const raw = await res.json();
+      const catalog = await getSkinCatalog();
+      const shop = parseStorefront(raw, catalog);
+      console.log(`[shop-checker] Storefront ${label} ketemu di shard ${shard}.`);
+      if (shard !== session.shard) {
+        const updated: UserRecord = { ...valid.user, shard };
+        await upsertUser(updated);
+        return { shop, user: updated };
+      }
+      return { shop, user: valid.user };
     }
-    return { shop, user: valid.user };
   }
   throw new Error(
     `Gagal ambil shop (${lastStatus || 'error'}) di semua shard (${shards.join(', ')}). ` +
-      `Akun ini mungkin belum pernah main Valorant di shard mana pun, atau region akunnya beda. ` +
       `Coba /logout lalu /login lagi dengan ssid baru.`,
   );
 }
@@ -183,16 +201,15 @@ export async function probePd(
   }
   const mmrStatus = await probe(`/mmr/v1/players/${session.puuid}`);
   const storefrontStatus = await probe(`/store/v2/storefront/${session.puuid}`);
-  // Hipotesis baru: game client 2026 sudah pakai Storefront v3 (bot lain
-  // seperti VAL-13T menyebut "Storefront v3 endpoints"), sementara v2
-  // yang dipakai bot ini mungkin sudah dipensiunkan Riot — makanya v2 404
-  // padahal wallet + MMR (v1) dengan token yang sama balas 200.
-  // Coba v3 dengan header yang sama; kalau 200, catat field atasnya biar
-  // tahu bentuk responsnya sebelum fetchShop dipindah ke v3.
+  // Storefront v3 adalah POST dengan body kosong {} (GET ke v3 balas 405).
   let storefrontV3Status = 0;
   let storefrontV3Keys: string[] = [];
   try {
-    const v3 = await fetch(`${base}/store/v3/storefront/${session.puuid}`, { headers });
+    const v3 = await fetch(`${base}/store/v3/storefront/${session.puuid}`, {
+      method: 'POST',
+      headers,
+      body: '{}',
+    });
     storefrontV3Status = v3.status;
     if (v3.ok) {
       const data = (await v3.json()) as Record<string, unknown>;
