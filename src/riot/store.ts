@@ -93,13 +93,40 @@ export async function fetchShop(
 
   const session: RiotSession = valid.session;
   const clientVersion = await getClientVersion();
-  const url = `https://pd.${session.shard}.a.pvp.net/store/v2/storefront/${session.puuid}`;
-  const res = await fetch(url, { headers: storefrontHeaders(session, clientVersion) });
-  if (res.status === 401 || res.status === 403) return { error: 'need-login' };
-  if (!res.ok) throw new Error(`Gagal ambil shop (${res.status})`);
-  const raw = await res.json();
-  const catalog = await getSkinCatalog();
-  return { shop: parseStorefront(raw, catalog), user: valid.user };
+  // Shard yang tersimpan bisa salah (dulu deteksi Riot Geo-nya bug, jadi
+  // selalu fallback ke ap). Storefront di shard yang salah balas 404,
+  // jadi coba shard tersimpan dulu, lalu shard lain sampai ada yang 200.
+  // Kalau ada shard lain yang berhasil, simpan shard itu buat ke depannya.
+  const shards = [session.shard, 'ap', 'na', 'eu', 'kr'].filter(
+    (s, i, arr) => s && arr.indexOf(s) === i,
+  );
+  let lastStatus = 0;
+  for (const shard of shards) {
+    const url = `https://pd.${shard}.a.pvp.net/store/v2/storefront/${session.puuid}`;
+    const res = await fetch(url, { headers: storefrontHeaders(session, clientVersion) });
+    if (res.status === 401 || res.status === 403) return { error: 'need-login' };
+    if (res.status === 404) {
+      console.log(`[shop-checker] Storefront 404 di shard ${shard}, coba shard lain...`);
+      lastStatus = 404;
+      continue;
+    }
+    if (!res.ok) throw new Error(`Gagal ambil shop (${res.status}) di shard ${shard}`);
+    const raw = await res.json();
+    const catalog = await getSkinCatalog();
+    const shop = parseStorefront(raw, catalog);
+    if (shard !== session.shard) {
+      console.log(`[shop-checker] Storefront ketemu di shard ${shard} (bukan ${session.shard}), shard disimpan.`);
+      const updated: UserRecord = { ...valid.user, shard };
+      await upsertUser(updated);
+      return { shop, user: updated };
+    }
+    return { shop, user: valid.user };
+  }
+  throw new Error(
+    `Gagal ambil shop (${lastStatus || 'error'}) di semua shard (${shards.join(', ')}). ` +
+      `Akun ini mungkin belum pernah main Valorant di shard mana pun, atau region akunnya beda. ` +
+      `Coba /logout lalu /login lagi dengan ssid baru.`,
+  );
 }
 
 export function formatDuration(seconds: number): string {

@@ -4,7 +4,7 @@ import type { UserRecord } from '../storage';
 
 const ENTITLEMENT_URL = 'https://entitlements.auth.riotgames.com/api/token/v1';
 const USERINFO_URL = 'https://auth.riotgames.com/userinfo';
-const GEO_URL = 'https://riot-geo.pas.riotgames.com/pas/v1/product/valorant';
+const GEO_URL = 'https://riot-geo.pas.si.riotgames.com/pas/v1/product/valorant';
 // Cookie reauth (GET /authorize) — cara resmi yang direkomendasikan docs Valorant API
 // buat gantiin login username/password langsung.
 const AUTHORIZE_URL =
@@ -81,19 +81,49 @@ async function getUserInfo(accessToken: string): Promise<{ puuid: string; name: 
   };
 }
 
-async function getShard(idToken: string): Promise<string> {
+/**
+ * Deteksi shard dari Riot Geo.
+ *
+ * Perhatian — versi lama fungsi ini salah 3 hal, dan itu yang bikin
+ * `/shop` 404: host-nya kurang `.si`, header Authorization-nya pakai
+ * id_token (harusnya access token), dan responsnya dibaca dari field
+ * `live_region` yang tidak ada. Respons yang benar:
+ * PUT riot-geo.pas.si.riotgames.com/pas/v1/product/valorant,
+ * header `Authorization: Bearer <access token>`, body `{ id_token }`,
+ * respons `{ affinities: { live: "<region>", pbe: "<region>" } }`.
+ * Region lalu dipetakan ke shard: latam/br/na -> na, eu -> eu,
+ * ap -> ap, kr -> kr. Kalau Geo gagal, fallback ke DEFAULT_SHARD (ap).
+ */
+async function getShard(accessToken: string, idToken: string): Promise<string> {
   try {
     const res = await fetch(GEO_URL, {
       method: 'PUT',
-      headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ id_token: idToken }),
     });
-    if (!res.ok) return config.defaultShard;
-    const data = (await res.json()) as { live_region?: string };
-    const region = (data.live_region ?? '').toLowerCase();
-    if (['ap', 'na', 'eu', 'kr', 'latam', 'br'].includes(region)) return region;
+    if (!res.ok) {
+      console.log(`[shop-checker] Riot Geo gagal (${res.status}), pakai shard default ${config.defaultShard}.`);
+      return config.defaultShard;
+    }
+    const data = (await res.json()) as { affinities?: { live?: string } };
+    const region = (data.affinities?.live ?? '').toLowerCase();
+    const regionToShard: Record<string, string> = {
+      ap: 'ap',
+      na: 'na',
+      br: 'na',
+      latam: 'na',
+      eu: 'eu',
+      kr: 'kr',
+    };
+    const shard = regionToShard[region];
+    if (shard) {
+      console.log(`[shop-checker] Riot Geo: region ${region} -> shard ${shard}.`);
+      return shard;
+    }
+    console.log(`[shop-checker] Riot Geo: region tidak dikenal (${region}), pakai shard default ${config.defaultShard}.`);
     return config.defaultShard;
-  } catch {
+  } catch (err) {
+    console.log(`[shop-checker] Riot Geo error (${(err as Error).message}), pakai shard default ${config.defaultShard}.`);
     return config.defaultShard;
   }
 }
@@ -166,7 +196,7 @@ async function buildSession(
   const [entitlement, user, shard] = await Promise.all([
     getEntitlement(accessToken),
     getUserInfo(accessToken),
-    getShard(idToken),
+    getShard(accessToken, idToken),
   ]);
   return {
     accessToken,
