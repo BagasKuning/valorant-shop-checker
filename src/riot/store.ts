@@ -24,17 +24,37 @@ interface SkinCatalogEntry {
 
 let catalogCache: { at: number; map: Map<string, SkinCatalogEntry> } | null = null;
 
-/** Ambil katalog skin dari valorant-api.com (publik, tanpa login), cache 24 jam. */
+/**
+ * Ambil katalog skin dari valorant-api.com (publik, tanpa login), cache 24 jam.
+ *
+ * KENAPA ADA DUA SUMBER: di storefront v3, OfferID / Rewards[0].ItemID
+ * itu BUKAN UUID skin, melainkan UUID *level* skin (level dasar).
+ * Terbukti langsung 2026-11-13: 24c73c29-… = "Ion Operator" di
+ * /v1/weapons/skinlevels (dan 404 di /v1/weapons/skins). displayName
+ * dan displayIcon level dasar itu = nama dan gambar skin-nya.
+ * Katalog skins tetap dimuat juga, biar payload gaya v2 (UUID skin
+ * langsung) tetap ke-resolve kalau Riot mengembalikannya lagi.
+ */
 export async function getSkinCatalog(): Promise<Map<string, SkinCatalogEntry>> {
   if (catalogCache && Date.now() - catalogCache.at < 24 * 60 * 60 * 1000) return catalogCache.map;
-  const res = await fetch('https://valorant-api.com/v1/weapons/skins');
-  if (!res.ok) throw new Error(`Gagal ambil katalog skin (${res.status})`);
-  const data = (await res.json()) as {
+  const [skinsRes, levelsRes] = await Promise.all([
+    fetch('https://valorant-api.com/v1/weapons/skins'),
+    fetch('https://valorant-api.com/v1/weapons/skinlevels'),
+  ]);
+  if (!skinsRes.ok) throw new Error(`Gagal ambil katalog skin (${skinsRes.status})`);
+  if (!levelsRes.ok) throw new Error(`Gagal ambil katalog skin levels (${levelsRes.status})`);
+  const skins = (await skinsRes.json()) as {
+    data?: Array<{ uuid?: string; displayName?: string; displayIcon?: string | null }>;
+  };
+  const levels = (await levelsRes.json()) as {
     data?: Array<{ uuid?: string; displayName?: string; displayIcon?: string | null }>;
   };
   const map = new Map<string, SkinCatalogEntry>();
-  for (const s of data.data ?? []) {
+  for (const s of skins.data ?? []) {
     if (s.uuid) map.set(s.uuid, { displayName: s.displayName ?? s.uuid, displayIcon: s.displayIcon ?? null });
+  }
+  for (const lv of levels.data ?? []) {
+    if (lv.uuid) map.set(lv.uuid, { displayName: lv.displayName ?? lv.uuid, displayIcon: lv.displayIcon ?? null });
   }
   catalogCache = { at: Date.now(), map };
   return map;
@@ -106,9 +126,11 @@ export function parseStorefront(
   const skinIds = panel?.SingleItemOffers ?? [];
   let items: ShopItem[];
   if (skinIds.length > 0) {
-    // Di v3, SingleItemOffers isinya UUID *offer* (bukan UUID skin —
-    // terbukti: UUID itu 404 di valorant-api.com/v1/weapons/skins, dan
-    // Rewards[0].ItemID di storefront isinya UUID offer yang sama).
+    // Di v3, SingleItemOffers isinya UUID *level* skin (level dasar),
+    // bukan UUID skin — terbukti: UUID itu 404 di
+    // valorant-api.com/v1/weapons/skins tapi 200 di
+    // /v1/weapons/skinlevels ("Ion Operator", "Oni Frenzy", dst).
+    // Katalog sudah berisi kedua-duanya, jadi lookup langsung ketemu.
     // Harga dicari dari offer yang cocok (OfferID / Rewards / urutan).
     items = skinIds.map((skinId, i) => {
       const offer =
