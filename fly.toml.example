@@ -1,0 +1,17 @@
+# Salin file ini jadi fly.toml, lalu ganti app name dengan nama yang unik.
+# Deploy: fly launch --no-deploy && fly secrets set DISCORD_TOKEN=... DISCORD_CLIENT_ID=... SESSION_SECRET=... && fly deploy
+# Biaya perkiraan: shared-cpu-1x 256MB ~$2/bulan (cek harga terbaru di fly.io).
+# Volume 1GB buat data/users.json biar login tidak hilang pas redeploy.
+app = "valorant-shop-checker-dwi"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+
+[[mounts]]
+  source = "valo_data"
+  destination = "/app/data"

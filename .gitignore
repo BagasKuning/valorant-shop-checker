@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.env.local
+data/users.json
+data/*.json
+!data/.gitkeep
+*.log
+.DS_Store
+fly.toml
