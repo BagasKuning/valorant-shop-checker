@@ -129,6 +129,75 @@ export async function fetchShop(
   );
 }
 
+export interface PdProbe {
+  riotName: string;
+  tag: string;
+  shard: string;
+  puuidPrefix: string;
+  clientVersion: string;
+  walletStatus: number;
+  walletVp: number | null;
+  mmrStatus: number;
+  storefrontStatus: number;
+}
+
+/**
+ * Diagnostik: tes token + puuid yang sama ke 3 endpoint pd yang berbeda,
+ * biar ketahuan apakah pd menolak token-nya sama sekali atau cuma
+ * storefront-nya yang 404.
+ * - wallet 200 + storefront 404  -> token diterima pd, masalah khusus storefront
+ * - wallet 404 + mmr 404          -> pd tidak kenal token/puuid ini sama sekali
+ *   (kemungkinan besar token web dari cookie reauth tidak diizinkan buat pd)
+ * - 401/403 di mana-mana          -> sesi habis, perlu /login lagi
+ */
+export async function probePd(
+  user: UserRecord,
+): Promise<PdProbe | { error: 'need-login' }> {
+  const valid = await getValidSession(user);
+  if (!valid) return { error: 'need-login' };
+  if (valid.user !== user) await upsertUser(valid.user);
+  const session: RiotSession = valid.session;
+  const clientVersion = await getClientVersion();
+  const headers = storefrontHeaders(session, clientVersion);
+  const base = `https://pd.${session.shard}.a.pvp.net`;
+  const probe = async (path: string): Promise<number> => {
+    try {
+      const res = await fetch(`${base}${path}`, { headers });
+      return res.status;
+    } catch {
+      return 0;
+    }
+  };
+  const walletRes = await fetch(`${base}/store/v1/wallet/${session.puuid}`, { headers });
+  const walletStatus = walletRes.status;
+  let walletVp: number | null = null;
+  if (walletRes.ok) {
+    try {
+      const data = (await walletRes.json()) as { Balances?: Record<string, number> };
+      walletVp = data.Balances?.[VP_CURRENCY_ID] ?? null;
+    } catch {
+      walletVp = null;
+    }
+  }
+  const mmrStatus = await probe(`/mmr/v1/players/${session.puuid}`);
+  const storefrontStatus = await probe(`/store/v2/storefront/${session.puuid}`);
+  console.log(
+    `[shop-checker] /debug ${session.riotName}#${session.tag} shard=${session.shard} ` +
+      `client=${clientVersion} wallet=${walletStatus} mmr=${mmrStatus} storefront=${storefrontStatus}`,
+  );
+  return {
+    riotName: session.riotName,
+    tag: session.tag,
+    shard: session.shard,
+    puuidPrefix: session.puuid.slice(0, 8),
+    clientVersion,
+    walletStatus,
+    walletVp,
+    mmrStatus,
+    storefrontStatus,
+  };
+}
+
 export function formatDuration(seconds: number): string {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);

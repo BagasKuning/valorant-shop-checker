@@ -5,7 +5,7 @@ import {
   type ChatInputCommandInteraction,
   type Client,
 } from 'discord.js';
-import { configCheckLabel, fetchShop, formatDuration, matchesWishlist, shardLabel } from '../riot/store';
+import { configCheckLabel, fetchShop, formatDuration, matchesWishlist, probePd, shardLabel } from '../riot/store';
 import { deleteUser, getUser, loadUsers, upsertUser } from '../storage';
 import { SSID_HOWTO, startLogin } from './loginFlow';
 
@@ -29,6 +29,9 @@ export const commands = [
   new SlashCommandBuilder()
     .setName('logout')
     .setDescription('Hapus login Riot kamu dari bot ini'),
+  new SlashCommandBuilder()
+    .setName('debug')
+    .setDescription('Cek kenapa /shop gagal: tes token kamu ke server Riot (wallet, MMR, storefront)'),
   new SlashCommandBuilder().setName('help').setDescription('Cara pakai bot Valorant Shop Checker'),
 ].map((c) => c.toJSON());
 
@@ -166,6 +169,36 @@ export async function handleCommand(
       await interaction.reply({ content: 'Logout berhasil. Login Riot dan wishlist kamu sudah dihapus dari bot ini.', flags: MessageFlags.Ephemeral });
       return;
     }
+    case 'debug': {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      const user = await getUser(userId);
+      if (!user) {
+        await interaction.editReply('Kamu belum login. Ketik `/login` dulu.');
+        return;
+      }
+      try {
+        const result = await probePd(user);
+        if ('error' in result) {
+          await interaction.editReply('Sesi Riot kamu sudah habis. Ketik `/login` lagi ya.');
+          return;
+        }
+        await interaction.editReply(
+          [
+            `**Debug — ${result.riotName}#${result.tag}**`,
+            `Shard: ${result.shard} • puuid: ${result.puuidPrefix}…`,
+            `Client version: \`${result.clientVersion}\``,
+            `Wallet (dompet VP): ${result.walletStatus}${result.walletVp !== null ? ` — ${result.walletVp} VP` : ''}`,
+            `MMR (data ranked): ${result.mmrStatus}`,
+            `Storefront (shop): ${result.storefrontStatus}`,
+            '',
+            'Screenshot / copy hasil ini ke Dodi, biar ketahuan token kamu diterima server Riot atau tidak.',
+          ].join('\n'),
+        );
+      } catch (err) {
+        await interaction.editReply(`Debug gagal: ${(err as Error).message}`);
+      }
+      return;
+    }
     case 'help': {
       await interaction.reply({
         content: [
@@ -173,6 +206,7 @@ export async function handleCommand(
           '',
           '`/login` — login Riot sekali lewat DM pakai cookie `ssid` (bot tidak pernah minta password)',
           '`/shop` — lihat daily shop + night market kamu hari ini (hanya kamu yang bisa lihat)',
+          '`/debug` — kalau `/shop` gagal, cek token kamu ke server Riot',
           '`/wishlist add <skin>` — misal `/wishlist add Reaver Vandal`',
           '`/wishlist list` — lihat wishlist kamu',
           '`/wishlist remove <skin>` — hapus dari wishlist',
