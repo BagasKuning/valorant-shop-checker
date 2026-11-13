@@ -73,7 +73,11 @@ export function parseStorefront(raw: unknown, catalog: Map<string, SkinCatalogEn
   const d = raw as {
     SkinsPanelLayout?: {
       SingleItemOffers?: string[];
-      SingleItemStoreOffers?: Array<{ OfferID?: string; Cost?: Record<string, number> }>;
+      SingleItemStoreOffers?: Array<{
+        OfferID?: string;
+        Cost?: Record<string, number>;
+        Rewards?: Array<{ ItemID?: string }>;
+      }>;
       SingleItemOffersRemainingDurationInSeconds?: number;
     };
     BonusStore?: {
@@ -85,13 +89,32 @@ export function parseStorefront(raw: unknown, catalog: Map<string, SkinCatalogEn
     FeaturedBundle?: { Bundle?: { DisplayName?: string } };
   };
   const panel = d.SkinsPanelLayout;
-  let items = (panel?.SingleItemStoreOffers ?? []).map((o) => mapOffer(o, catalog));
-  // Kalau SingleItemStoreOffers kosong tapi SingleItemOffers ada isinya,
-  // tampilkan skin-nya dari daftar itu (tanpa harga).
-  if (items.length === 0 && (panel?.SingleItemOffers?.length ?? 0) > 0) {
-    items = (panel?.SingleItemOffers ?? []).map((id) =>
-      mapOffer({ OfferID: id }, catalog),
-    );
+  const storeOffers = panel?.SingleItemStoreOffers ?? [];
+  const skinIds = panel?.SingleItemOffers ?? [];
+  let items: ShopItem[];
+  if (skinIds.length > 0) {
+    // Di v3, daftar skin-nya ada di SingleItemOffers (UUID skin), sementara
+    // SingleItemStoreOffers isinya offer + harga — OfferID di sana adalah
+    // UUID offer, bukan UUID skin, jadi jangan pakai itu buat cari nama.
+    // Harga dicari dari offer yang cocok (OfferID / Rewards / urutan).
+    items = skinIds.map((skinId, i) => {
+      const offer =
+        storeOffers.find((o) => o.OfferID === skinId) ??
+        storeOffers.find((o) => o.Rewards?.[0]?.ItemID === skinId) ??
+        storeOffers[i];
+      const entry = catalog.get(skinId);
+      if (!entry) {
+        console.log(`[shop-checker] skin tidak ada di katalog: ${skinId}`);
+      }
+      return {
+        uuid: skinId,
+        name: entry?.displayName ?? skinId,
+        icon: entry?.displayIcon ?? null,
+        vp: offer?.Cost?.[VP_CURRENCY_ID] ?? null,
+      };
+    });
+  } else {
+    items = storeOffers.map((o) => mapOffer(o, catalog));
   }
   const nightMarket = (d.BonusStore?.BonusStoreOffers ?? []).map((b) => {
     const item = mapOffer(b.Offer ?? {}, catalog);
@@ -153,8 +176,8 @@ export async function fetchShop(
       if (!res.ok) throw new Error(`Gagal ambil shop (${res.status}) di shard ${shard} (${label})`);
       const raw = await res.json();
       const catalog = await getSkinCatalog();
+      console.log(`[shop-checker] katalog skin: ${catalog.size} entri, shop ${label} ketemu di shard ${shard}.`);
       const shop = parseStorefront(raw, catalog);
-      console.log(`[shop-checker] Storefront ${label} ketemu di shard ${shard}.`);
       if (shard !== session.shard) {
         const updated: UserRecord = { ...valid.user, shard };
         await upsertUser(updated);
