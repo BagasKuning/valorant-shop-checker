@@ -18,7 +18,7 @@ Buat diri sendiri + teman, bukan bot publik. Private, server kamu sendiri.
 
 | Perintah | Fungsi |
 | --- | --- |
-| `/login` | Login Riot sekali lewat DM (username → password → 2FA kalau ada) |
+| `/login` | Login Riot sekali lewat DM (paste cookie `ssid` dari browser) |
 | `/shop` | Lihat 4 daily shop + night market hari ini (ephemeral, hanya kamu yang lihat) |
 | `/wishlist add <skin>` | Misal `/wishlist add Reaver Vandal` |
 | `/wishlist list` | Lihat wishlist kamu |
@@ -31,15 +31,35 @@ user dan DM kamu kalau skin incaran muncul.
 
 ## Cara kerja (singkat)
 
-1. Kamu `/login` di server → bot DM kamu → kamu ketik username Riot,
-   lalu password Riot di DM itu.
-2. Bot login ke `auth.riotgames.com`, kalau ada 2FA bot minta kodenya
-   sekali itu aja, lalu ambil entitlement token + PUUID + shard kamu.
-3. **Password langsung dibuang, tidak disimpan.** Yang disimpan hanya
+1. Kamu `/login` di server → bot DM kamu → kamu paste nilai cookie
+   `ssid` Riot kamu di DM itu.
+2. Bot tukar `ssid` itu jadi access token + entitlement + PUUID + shard
+   kamu lewat Cookie Reauth (`GET auth.riotgames.com/authorize`).
+3. **Bot tidak pernah minta password Riot.** Yang disimpan hanya
    access token + entitlement + cookies, dienkripsi AES-256-GCM pakai
    `SESSION_SECRET`, di file `data/users.json`.
 4. Token di-refresh otomatis pakai cookies sebelum expire. Kalau refresh
-   gagal (misal kamu ganti password), bot minta `/login` lagi.
+   gagal (ssid kedaluwarsa, biasanya ~1-3 minggu), bot minta `/login`
+   lagi dengan `ssid` baru.
+
+### Cara ambil cookie `ssid`
+
+1. Login ke https://playvalorant.com di browser (Chrome/Opera/Firefox).
+2. Tekan F12 → tab **Application** → **Cookies** →
+   `https://auth.riotgames.com`.
+3. Cari cookie bernama `ssid`, salin **nilainya**.
+4. Paste nilai itu di DM bot setelah `/login`. Jangan kirim password
+   Riot ke bot / ke siapa pun.
+
+### Kenapa bukan login username/password?
+
+Riot mengubah endpoint login langsung (`PUT /api/v1/authorization`):
+format body lamanya sekarang ditolak dengan error `invalid_request`,
+dan format barunya butuh token hCaptcha dari halaman login Riot.
+Docs Valorant API sendiri bilang login langsung "prone to breakage
+(captchas and cloudflare anti-bot)" dan menyarankan Cookie Reauth.
+Itulah kenapa bot ini pakai `ssid` — login lewat browser resmi Riot,
+bot cuma menerima cookie sesinya.
 5. `/shop` manggil `pd.{shard}.a.pvp.net/store/v2/storefront/{puuid}`,
    lalu nama / gambar / harga skin dicocokkan dari `valorant-api.com`
    (publik, tanpa login).
@@ -131,8 +151,9 @@ src/
 
 ## Keamanan — baca ini sebelum dipakai teman
 
-- Password Riot **tidak pernah disimpan** dan tidak pernah di-log.
-  Pesan DM berisi password / kode 2FA dicoba dihapus bot setelah dibaca.
+- Password Riot **tidak pernah diminta, disimpan, atau di-log**.
+  Pesan DM berisi cookie `ssid` dicoba dihapus bot setelah dibaca.
+  Jangan pernah kirim password Riot ke bot ini atau bot lain.
 - Token Riot disimpan terenkripsi. Kalau `SESSION_SECRET` bocor,
   token bisa didekripsi — jaga secret itu seperti password.
 - Jangan commit `.env`, `data/users.json`, atau `fly.toml` berisi secret

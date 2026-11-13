@@ -2,10 +2,13 @@ import { config, RIOT_CLIENT_PLATFORM_B64 } from '../config';
 import { decrypt, encrypt } from '../crypto';
 import type { UserRecord } from '../storage';
 
-const AUTH_URL = 'https://auth.riotgames.com/api/v1/authorization';
 const ENTITLEMENT_URL = 'https://entitlements.auth.riotgames.com/api/token/v1';
 const USERINFO_URL = 'https://auth.riotgames.com/userinfo';
 const GEO_URL = 'https://riot-geo.pas.riotgames.com/pas/v1/product/valorant';
+// Cookie reauth (GET /authorize) — cara resmi yang direkomendasikan docs Valorant API
+// buat gantiin login username/password langsung.
+const AUTHORIZE_URL =
+  'https://auth.riotgames.com/authorize?redirect_uri=https%3A%2F%2Fplayvalorant.com%2Fopt_in&client_id=play-valorant-web-prod&response_type=token%20id_token&nonce=1&scope=account%20openid';
 
 export interface RiotSession {
   accessToken: string;
@@ -44,14 +47,6 @@ function cookieHeader(jar: CookieJar): string {
 function mergeJar(a: CookieJar, b: CookieJar): CookieJar {
   return { ...a, ...b };
 }
-
-const AUTH_BODY = {
-  client_id: 'play-valorant-web-prod',
-  nonce: '1',
-  redirect_uri: 'https://playvalorant.com/opt_in',
-  response_type: 'token id_token',
-  scope: 'account openid',
-};
 
 function parseTokenFromUri(uri: string): { accessToken: string; idToken: string } | null {
   const hash = uri.split('#')[1] ?? '';
@@ -113,64 +108,54 @@ export async function getClientVersion(): Promise<string> {
   }
 }
 
-export type LoginResult =
-  | { status: 'ok'; session: RiotSession }
-  | { status: 'mfa'; cookies: CookieJar };
-
-/** Langkah 1 login: username + password. Kalau akun pakai 2FA, kembalikan status mfa. */
-export async function loginStep1(username: string, password: string): Promise<LoginResult> {
-  let jar: CookieJar = {};
-  // 1. Minta cookies dulu
-  const init = await fetch(AUTH_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(AUTH_BODY),
-  });
-  jar = mergeJar(jar, parseSetCookie(init.headers));
-
-  // 2. Kirim username/password
-  const res = await fetch(AUTH_URL, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json', Cookie: cookieHeader(jar) },
-    body: JSON.stringify({ type: 'auth', username, password, remember: true }),
-  });
-  jar = mergeJar(jar, parseSetCookie(res.headers));
-  const data = (await res.json()) as {
-    type?: string;
-    error?: string;
-    response?: { parameters?: { uri?: string } };
-  };
-
-  if (data.type === 'multifactor') return { status: 'mfa', cookies: jar };
-  if (data.type === 'response' && data.response?.parameters?.uri) {
-    const tokens = parseTokenFromUri(data.response.parameters.uri);
-    if (!tokens) throw new Error('Token tidak ditemukan di respons Riot');
-    return { status: 'ok', session: await buildSession(tokens.accessToken, tokens.idToken, jar) };
+/**
+ * Login pakai cookie `ssid` Riot — pengganti login username/password.
+ *
+ * Kenapa password login dihapus: Riot mengubah endpoint
+ * PUT /api/v1/authorization. Format body lamanya
+ * { type: "auth", username, password } sekarang ditolak dengan
+ * error `invalid_request`. Format barunya butuh
+ * riot_identity: { captcha, username, password } — captcha hCaptcha
+ * dari halaman login Riot, yang tidak bisa diisi bot Discord.
+ * Docs Valorant API sendiri bilang login langsung "prone to breakage
+ * (captchas and cloudflare anti-bot)" dan menyarankan Cookie Reauth
+ * atau login lewat webview.
+ *
+ * Cara ambil ssid (sekali, di browser sendiri):
+ * 1. Login ke https://playvalorant.com di browser (Chrome/Opera/Firefox).
+ * 2. DevTools (F12) > Application > Cookies > https://auth.riotgames.com
+ *    > salin nilai cookie `ssid`.
+ * 3. Paste ssid itu di DM bot setelah `/login`. Bot TIDAK pernah
+ *    minta password Riot lagi.
+ * SSID cuma dipakai buat tukar jadi access token + entitlement, lalu
+ * disimpan terenkripsi bareng tokennya. Refresh berikutnya pakai
+ * cookie yang sama (reauth), tanpa password.
+ */
+export async function loginWithSsid(ssidRaw: string): Promise<RiotSession> {
+  const ssid = ssidRaw.trim().replace(/^ssid=/i, '').trim();
+  if (!ssid || ssid.length < 10) {
+    throw new Error('SSID tidak valid. Salin nilai cookie `ssid` dari browser kamu, lalu paste di DM ini.');
   }
-  if (data.error === 'auth_failure') throw new Error('Username / password Riot salah.');
-  if (data.error === 'rate_limited') throw new Error('Terlalu banyak percobaan login. Tunggu sebentar lalu coba lagi.');
-  throw new Error(`Login gagal: ${data.error ?? data.type ?? 'unknown'}`);
+  return cookieReauth({ ssid });
 }
 
-/** Langkah 2 login (kalau 2FA): kirim kode 2FA. */
-export async function loginStep2Mfa(cookies: CookieJar, code: string): Promise<RiotSession> {
-  const res = await fetch(AUTH_URL, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json', Cookie: cookieHeader(cookies) },
-    body: JSON.stringify({ type: 'multifactor', code, remember: true }),
+/** Tukar cookie (khususnya `ssid`) jadi session, lewat GET /authorize. */
+export async function cookieReauth(cookies: CookieJar): Promise<RiotSession> {
+  const res = await fetch(AUTHORIZE_URL, {
+    method: 'GET',
+    headers: { Cookie: cookieHeader(cookies) },
+    redirect: 'manual',
   });
   const jar = mergeJar(cookies, parseSetCookie(res.headers));
-  const data = (await res.json()) as {
-    type?: string;
-    error?: string;
-    response?: { parameters?: { uri?: string } };
-  };
-  if (data.type === 'response' && data.response?.parameters?.uri) {
-    const tokens = parseTokenFromUri(data.response.parameters.uri);
+  const location = res.headers.get('location') ?? '';
+  if (location.startsWith('https://playvalorant.com/opt_in#')) {
+    const tokens = parseTokenFromUri(location);
     if (!tokens) throw new Error('Token tidak ditemukan di respons Riot');
     return buildSession(tokens.accessToken, tokens.idToken, jar);
   }
-  throw new Error(`Kode 2FA salah atau sudah kedaluwarsa (${data.error ?? data.type ?? 'unknown'}). Coba /login lagi.`);
+  throw new Error(
+    'SSID tidak valid / sudah kedaluwarsa. Login ulang di browser Riot (playvalorant.com), ambil cookie `ssid` yang baru, lalu /login lagi.',
+  );
 }
 
 async function buildSession(
@@ -201,22 +186,7 @@ async function buildSession(
 export async function reauth(user: UserRecord): Promise<RiotSession | null> {
   try {
     const jar = JSON.parse(decrypt(user.encCookies)) as CookieJar;
-    const res = await fetch(AUTH_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Cookie: cookieHeader(jar) },
-      body: JSON.stringify(AUTH_BODY),
-    });
-    const data = (await res.json()) as {
-      type?: string;
-      response?: { parameters?: { uri?: string } };
-    };
-    if (data.type === 'response' && data.response?.parameters?.uri) {
-      const tokens = parseTokenFromUri(data.response.parameters.uri);
-      if (!tokens) return null;
-      const newJar = mergeJar(jar, parseSetCookie(res.headers));
-      return buildSession(tokens.accessToken, tokens.idToken, newJar);
-    }
-    return null;
+    return await cookieReauth(jar);
   } catch {
     return null;
   }

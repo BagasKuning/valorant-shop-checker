@@ -1,17 +1,18 @@
 import {
   EmbedBuilder,
+  MessageFlags,
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
   type Client,
 } from 'discord.js';
 import { configCheckLabel, fetchShop, formatDuration, matchesWishlist, shardLabel } from '../riot/store';
 import { deleteUser, getUser, loadUsers, upsertUser } from '../storage';
-import { startLogin } from './loginFlow';
+import { SSID_HOWTO, startLogin } from './loginFlow';
 
 export const commands = [
   new SlashCommandBuilder()
     .setName('login')
-    .setDescription('Login Riot sekali (lewat DM) — abis itu tidak perlu login lagi'),
+    .setDescription('Login Riot sekali pakai cookie ssid (lewat DM) — abis itu tidak perlu login lagi'),
   new SlashCommandBuilder()
     .setName('shop')
     .setDescription('Lihat daily shop + night market kamu hari ini'),
@@ -69,7 +70,7 @@ export async function handleCommand(
       if (existing) {
         await interaction.reply({
           content: `Kamu sudah login sebagai **${existing.riotName}#${existing.tag}**. Pakai \`/shop\` aja, atau \`/logout\` dulu kalau mau ganti akun.`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
@@ -78,23 +79,23 @@ export async function handleCommand(
         content:
           'Oke, cek **DM** kamu. Aku sudah kirim langkah login di sana.\n' +
           'Login cuma sekali — abis itu kamu tinggal `/shop` dari HP kapan aja.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       try {
         await interaction.user.send(
-          'Halo! Buat login Riot, ketik dulu **username Riot** kamu di DM ini.\n' +
-          'Jangan kirim password di server / channel umum — hanya di DM ini.',
+          'Halo! Buat login Riot, paste **nilai cookie `ssid`** kamu di DM ini.\n' +
+          'Bot tidak pernah minta password Riot — jangan kirim password di mana pun.\n\n' + SSID_HOWTO,
         );
       } catch {
         await interaction.followUp({
           content: 'Aku tidak bisa DM kamu. Buka Settings Discord > Privacy > Allow direct messages, lalu coba `/login` lagi.',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
       return;
     }
     case 'shop': {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       const user = await getUser(userId);
       if (!user) {
         await interaction.editReply('Kamu belum login. Ketik `/login` dulu (cuma sekali).');
@@ -121,7 +122,7 @@ export async function handleCommand(
       const sub = interaction.options.getSubcommand();
       const user = await getUser(userId);
       if (!user) {
-        await interaction.reply({ content: 'Kamu belum login. Ketik `/login` dulu.', ephemeral: true });
+        await interaction.reply({ content: 'Kamu belum login. Ketik `/login` dulu.', flags: MessageFlags.Ephemeral });
         return;
       }
       if (sub === 'list') {
@@ -130,39 +131,39 @@ export async function handleCommand(
             user.wishlist.length === 0
               ? 'Wishlist kamu masih kosong. Tambah dengan `/wishlist add <nama skin>`, misal `/wishlist add Reaver Vandal`.'
               : `Wishlist kamu:\n${user.wishlist.map((w, i) => `${i + 1}. ${w}`).join('\n')}\n\nBot akan DM kamu tiap pagi ${configCheckLabel()} kalau ada yang muncul di shop.`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
       const skin = (interaction.options.getString('skin') ?? '').trim();
       if (!skin) {
-        await interaction.reply({ content: 'Nama skin-nya kosong.', ephemeral: true });
+        await interaction.reply({ content: 'Nama skin-nya kosong.', flags: MessageFlags.Ephemeral });
         return;
       }
       if (sub === 'add') {
         if (user.wishlist.some((w) => w.toLowerCase() === skin.toLowerCase())) {
-          await interaction.reply({ content: `"${skin}" sudah ada di wishlist kamu.`, ephemeral: true });
+          await interaction.reply({ content: `"${skin}" sudah ada di wishlist kamu.`, flags: MessageFlags.Ephemeral });
           return;
         }
         user.wishlist.push(skin);
         await upsertUser(user);
-        await interaction.reply({ content: `Ditambahkan ke wishlist: **${skin}**. Bot akan DM kamu kalau skin ini muncul di shop.`, ephemeral: true });
+        await interaction.reply({ content: `Ditambahkan ke wishlist: **${skin}**. Bot akan DM kamu kalau skin ini muncul di shop.`, flags: MessageFlags.Ephemeral });
         return;
       }
       // remove
       const before = user.wishlist.length;
       user.wishlist = user.wishlist.filter((w) => w.toLowerCase() !== skin.toLowerCase());
       if (user.wishlist.length === before) {
-        await interaction.reply({ content: `"${skin}" tidak ada di wishlist kamu.`, ephemeral: true });
+        await interaction.reply({ content: `"${skin}" tidak ada di wishlist kamu.`, flags: MessageFlags.Ephemeral });
         return;
       }
       await upsertUser(user);
-      await interaction.reply({ content: `Dihapus dari wishlist: **${skin}**.`, ephemeral: true });
+      await interaction.reply({ content: `Dihapus dari wishlist: **${skin}**.`, flags: MessageFlags.Ephemeral });
       return;
     }
     case 'logout': {
       await deleteUser(userId);
-      await interaction.reply({ content: 'Logout berhasil. Login Riot dan wishlist kamu sudah dihapus dari bot ini.', ephemeral: true });
+      await interaction.reply({ content: 'Logout berhasil. Login Riot dan wishlist kamu sudah dihapus dari bot ini.', flags: MessageFlags.Ephemeral });
       return;
     }
     case 'help': {
@@ -170,7 +171,7 @@ export async function handleCommand(
         content: [
           '**Valorant Shop Checker — buat kamu + teman, cek dari HP**',
           '',
-          '`/login` — login Riot sekali lewat DM (password tidak disimpan)',
+          '`/login` — login Riot sekali lewat DM pakai cookie `ssid` (bot tidak pernah minta password)',
           '`/shop` — lihat daily shop + night market kamu hari ini (hanya kamu yang bisa lihat)',
           '`/wishlist add <skin>` — misal `/wishlist add Reaver Vandal`',
           '`/wishlist list` — lihat wishlist kamu',
@@ -180,12 +181,12 @@ export async function handleCommand(
           `Bot cek wishlist tiap pagi ${configCheckLabel()} dan DM kamu kalau skin incaran muncul.`,
           'Bot ini private, hanya untuk server kamu + teman. Jangan share token / SESSION_SECRET ke siapa pun.',
         ].join('\n'),
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
     default:
-      await interaction.reply({ content: 'Perintah tidak dikenal.', ephemeral: true });
+      await interaction.reply({ content: 'Perintah tidak dikenal.', flags: MessageFlags.Ephemeral });
   }
 }
 

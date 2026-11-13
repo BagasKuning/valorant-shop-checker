@@ -2,6 +2,7 @@ import {
   Client,
   Events,
   GatewayIntentBits,
+  MessageFlags,
   Partials,
   REST,
   Routes,
@@ -60,18 +61,18 @@ async function main(): Promise<void> {
       console.error('[shop-checker] command error:', err);
       const msg = 'Waduh, botnya error. Coba lagi bentar lagi ya.';
       if (interaction.deferred) await interaction.editReply(msg);
-      else if (!interaction.replied) await interaction.reply({ content: msg, ephemeral: true });
+      else if (!interaction.replied) await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral });
     }
   });
 
-  // DM login flow: /login -> username -> password -> (2FA) -> selesai
+  // DM login flow: /login -> paste cookie ssid -> selesai (tanpa password)
   client.on(Events.MessageCreate, async (message) => {
     if (message.author.bot) return;
     if (message.guildId !== null) return; // hanya DM
     if (!isPending(message.author.id)) return;
     const reply = await handleLoginDm(message.author.id, message.content);
     if (reply) {
-      // Hapus pesan user yang berisi password / kode 2FA kalau bisa, lalu balas.
+      // Hapus pesan user yang berisi cookie ssid kalau bisa, lalu balas.
       // Di DM, hapus mungkin gagal tergantung permission — abaikan kalau gagal.
       await message.delete().catch(() => undefined);
       await message.author.send(reply).catch(() => undefined);
