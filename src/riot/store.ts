@@ -93,22 +93,31 @@ export function parseStorefront(raw: unknown, catalog: Map<string, SkinCatalogEn
   const skinIds = panel?.SingleItemOffers ?? [];
   let items: ShopItem[];
   if (skinIds.length > 0) {
-    // Di v3, daftar skin-nya ada di SingleItemOffers (UUID skin), sementara
-    // SingleItemStoreOffers isinya offer + harga — OfferID di sana adalah
-    // UUID offer, bukan UUID skin, jadi jangan pakai itu buat cari nama.
+    // Di v3, SingleItemOffers isinya UUID *offer* (bukan UUID skin —
+    // terbukti: UUID itu 404 di valorant-api.com/v1/weapons/skins).
+    // UUID skin-nya ada di Rewards[0].ItemID di offer yang cocok.
     // Harga dicari dari offer yang cocok (OfferID / Rewards / urutan).
     items = skinIds.map((skinId, i) => {
       const offer =
         storeOffers.find((o) => o.OfferID === skinId) ??
         storeOffers.find((o) => o.Rewards?.[0]?.ItemID === skinId) ??
         storeOffers[i];
-      const entry = catalog.get(skinId);
+      const rewardItemId = offer?.Rewards?.[0]?.ItemID;
+      const skinUuid =
+        (rewardItemId && catalog.has(rewardItemId) ? rewardItemId : undefined) ??
+        (catalog.has(skinId) ? skinId : undefined) ??
+        rewardItemId ??
+        offer?.OfferID ??
+        skinId;
+      const entry = catalog.get(skinUuid);
       if (!entry) {
-        console.log(`[shop-checker] skin tidak ada di katalog: ${skinId}`);
+        console.log(
+          `[shop-checker] skin tidak ada di katalog: offer=${skinId} rewards=${rewardItemId ?? '-'}`,
+        );
       }
       return {
-        uuid: skinId,
-        name: entry?.displayName ?? skinId,
+        uuid: skinUuid,
+        name: entry?.displayName ?? skinUuid,
         icon: entry?.displayIcon ?? null,
         vp: offer?.Cost?.[VP_CURRENCY_ID] ?? null,
       };
