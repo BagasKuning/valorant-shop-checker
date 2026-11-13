@@ -40,44 +40,6 @@ export async function getSkinCatalog(): Promise<Map<string, SkinCatalogEntry>> {
   return map;
 }
 
-let offersCache: { at: number; map: Map<string, string> } | null = null;
-
-/**
- * GET /store/v1/offers/ — peta OfferID -> UUID item (skin) yang sebenarnya.
- *
- * Di v3, OfferID di storefront adalah UUID offer Riot, bukan UUID skin:
- * SingleItemOffers, OfferID, dan Rewards[0].ItemID di storefront semuanya
- * berisi UUID offer yang sama (terbukti dari log terminal), dan UUID itu
- * tidak ada di katalog skin valorant-api (404). Endpoint offers inilah
- * yang memetakan OfferID ke item-nya ("maps offer IDs to their
- * corresponding items and prices").
- */
-export async function getOfferSkinMap(
-  session: RiotSession,
-  shard: string,
-  clientVersion: string,
-): Promise<Map<string, string>> {
-  if (offersCache && Date.now() - offersCache.at < 24 * 60 * 60 * 1000) return offersCache.map;
-  const res = await fetch(`https://pd.${shard}.a.pvp.net/store/v1/offers/`, {
-    headers: storefrontHeaders(session, clientVersion),
-  });
-  if (!res.ok) {
-    console.log(`[shop-checker] gagal ambil daftar offers (${res.status}), nama skin mungkin tetap UUID.`);
-    return offersCache?.map ?? new Map();
-  }
-  const data = (await res.json()) as {
-    Offers?: Array<{ OfferID?: string; Rewards?: Array<{ ItemID?: string }> }>;
-  };
-  const map = new Map<string, string>();
-  for (const o of data.Offers ?? []) {
-    const itemId = o.Rewards?.[0]?.ItemID;
-    if (o.OfferID && itemId) map.set(o.OfferID, itemId);
-  }
-  offersCache = { at: Date.now(), map };
-  console.log(`[shop-checker] daftar offers: ${map.size} entri.`);
-  return map;
-}
-
 function mapOffer(
   offer: {
     OfferID?: string;
@@ -85,15 +47,12 @@ function mapOffer(
     Rewards?: Array<{ ItemID?: string }>;
   },
   catalog: Map<string, SkinCatalogEntry>,
-  offerSkinMap: Map<string, string> = new Map(),
 ): ShopItem {
-  // Urutan cari UUID skin: peta offers -> Rewards -> OfferID.
+  // Urutan cari UUID skin: Rewards -> OfferID.
   // Pakai yang ketemu di katalog; kalau tidak ada, pakai yang pertama ada.
-  const candidates = [
-    offer.OfferID ? offerSkinMap.get(offer.OfferID) : undefined,
-    offer.Rewards?.[0]?.ItemID,
-    offer.OfferID,
-  ].filter((c): c is string => !!c);
+  const candidates = [offer.Rewards?.[0]?.ItemID, offer.OfferID].filter(
+    (c): c is string => !!c,
+  );
   const uuid = candidates.find((c) => catalog.has(c)) ?? candidates[0] ?? '';
   const entry = catalog.get(uuid);
   return {
@@ -109,10 +68,11 @@ export function youtubeSearchUrl(skinName: string): string {
   return `https://www.youtube.com/results?search_query=${encodeURIComponent(`${skinName} Valorant skin`)}`;
 }
 
+let loggedRawShop = false;
+
 export function parseStorefront(
   raw: unknown,
   catalog: Map<string, SkinCatalogEntry>,
-  offerSkinMap: Map<string, string> = new Map(),
 ): ShopResult {
   const d = raw as {
     SkinsPanelLayout?: {
@@ -133,6 +93,15 @@ export function parseStorefront(
     FeaturedBundle?: { Bundle?: { DisplayName?: string } };
   };
   const panel = d.SkinsPanelLayout;
+  // Sekali per proses: tampilkan bentuk mentah respons v3 di terminal,
+  // biar ketahuan field apa yang sebenarnya membawa UUID skin.
+  // (Tidak ada data sensitif di sini — cuma UUID offer, harga, dan tanggal.)
+  if (!loggedRawShop) {
+    loggedRawShop = true;
+    console.log(`[shop-checker] storefront keys: ${Object.keys(d).join(',')}`);
+    console.log(`[shop-checker] panel keys: ${Object.keys(panel ?? {}).join(',')}`);
+    console.log(`[shop-checker] contoh offer v3: ${JSON.stringify(panel?.SingleItemStoreOffers?.[0] ?? null)}`);
+  }
   const storeOffers = panel?.SingleItemStoreOffers ?? [];
   const skinIds = panel?.SingleItemOffers ?? [];
   let items: ShopItem[];
@@ -140,7 +109,6 @@ export function parseStorefront(
     // Di v3, SingleItemOffers isinya UUID *offer* (bukan UUID skin —
     // terbukti: UUID itu 404 di valorant-api.com/v1/weapons/skins, dan
     // Rewards[0].ItemID di storefront isinya UUID offer yang sama).
-    // UUID skin-nya didapat dari peta offers (/store/v1/offers/).
     // Harga dicari dari offer yang cocok (OfferID / Rewards / urutan).
     items = skinIds.map((skinId, i) => {
       const offer =
@@ -148,19 +116,16 @@ export function parseStorefront(
         storeOffers.find((o) => o.Rewards?.[0]?.ItemID === skinId) ??
         storeOffers[i];
       const rewardItemId = offer?.Rewards?.[0]?.ItemID;
-      const mappedSkinId = offerSkinMap.get(skinId);
       const skinUuid =
-        (mappedSkinId && catalog.has(mappedSkinId) ? mappedSkinId : undefined) ??
         (rewardItemId && catalog.has(rewardItemId) ? rewardItemId : undefined) ??
         (catalog.has(skinId) ? skinId : undefined) ??
-        mappedSkinId ??
         rewardItemId ??
         offer?.OfferID ??
         skinId;
       const entry = catalog.get(skinUuid);
       if (!entry) {
         console.log(
-          `[shop-checker] skin tidak ada di katalog: offer=${skinId} rewards=${rewardItemId ?? '-'} mapped=${mappedSkinId ?? '-'}`,
+          `[shop-checker] skin tidak ada di katalog: offer=${skinId} rewards=${rewardItemId ?? '-'}`,
         );
       }
       return {
@@ -171,10 +136,10 @@ export function parseStorefront(
       };
     });
   } else {
-    items = storeOffers.map((o) => mapOffer(o, catalog, offerSkinMap));
+    items = storeOffers.map((o) => mapOffer(o, catalog));
   }
   const nightMarket = (d.BonusStore?.BonusStoreOffers ?? []).map((b) => {
-    const item = mapOffer(b.Offer ?? {}, catalog, offerSkinMap);
+    const item = mapOffer(b.Offer ?? {}, catalog);
     return { ...item, discountVp: b.DiscountCosts?.[VP_CURRENCY_ID] ?? null };
   });
   return {
@@ -233,9 +198,8 @@ export async function fetchShop(
       if (!res.ok) throw new Error(`Gagal ambil shop (${res.status}) di shard ${shard} (${label})`);
       const raw = await res.json();
       const catalog = await getSkinCatalog();
-      const offerSkinMap = await getOfferSkinMap(session, shard, clientVersion);
       console.log(`[shop-checker] katalog skin: ${catalog.size} entri, shop ${label} ketemu di shard ${shard}.`);
-      const shop = parseStorefront(raw, catalog, offerSkinMap);
+      const shop = parseStorefront(raw, catalog);
       console.log(`[shop-checker] shop: ${shop.items.map((it) => it.name).join(' | ')}`);
       if (shard !== session.shard) {
         const updated: UserRecord = { ...valid.user, shard };

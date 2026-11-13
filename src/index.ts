@@ -10,6 +10,7 @@ import {
 import { config } from './config';
 import { commands, handleCommand } from './discord/commands';
 import { handleLoginDm, isPending } from './discord/loginFlow';
+import { getSkinCatalog } from './riot/store';
 import { startScheduler } from './scheduler';
 
 async function registerCommands(): Promise<void> {
@@ -50,7 +51,26 @@ async function main(): Promise<void> {
   client.once(Events.ClientReady, (c) => {
     console.log(`[shop-checker] Login sebagai ${c.user.tag}`);
     console.log('[shop-checker] Bot private — invite hanya ke server kamu + teman.');
+    // Panaskan cache katalog skin di background, biar /shop pertama
+    // setelah restart tidak lama (katalognya 1400+ skin).
+    getSkinCatalog().catch((err) => console.log('[shop-checker] gagal panaskan katalog:', err));
     startScheduler(client);
+  });
+
+  // Tanpa listener 'error', satu rejection yang lolos dari handler di atas
+  // di-emit sebagai event 'error' di Client dan melempar (crash) proses
+  // Node — persis yang terjadi 2026-11-13 18:47 WIB: deferReply gagal
+  // Unknown interaction (10062), lalu reply darurat di catch ikut gagal
+  // dengan 10062 yang sama dan membunuh bot. Listener ini + try/catch di
+  // bawah memastikan error interaction tidak pernah mematikan bot lagi.
+  client.on(Events.Error, (err) => {
+    console.error('[shop-checker] client error:', err);
+  });
+  client.on(Events.ShardError, (err) => {
+    console.error('[shop-checker] shard error:', err);
+  });
+  process.on('unhandledRejection', (err) => {
+    console.error('[shop-checker] unhandled rejection (bot tetap jalan):', err);
   });
 
   client.on(Events.InteractionCreate, async (interaction) => {
@@ -59,9 +79,18 @@ async function main(): Promise<void> {
       await handleCommand(interaction, client);
     } catch (err) {
       console.error('[shop-checker] command error:', err);
+      // Balasan darurat ini TIDAK BOLEH throw lagi: kalau interaction-nya
+      // sudah kedaluwarsa (Unknown interaction 10062, misal command dikirim
+      // pas bot lagi restart), reply/editReply ikut gagal — dan rejection
+      // itu yang sebelumnya men-crash bot. Abaikan saja; user tinggal
+      // ketik command-nya ulang.
       const msg = 'Waduh, botnya error. Coba lagi bentar lagi ya.';
-      if (interaction.deferred) await interaction.editReply(msg);
-      else if (!interaction.replied) await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral });
+      try {
+        if (interaction.deferred) await interaction.editReply(msg);
+        else if (!interaction.replied) await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral });
+      } catch {
+        // Interaction sudah kedaluwarsa / tidak bisa dibalas — bukan error baru.
+      }
     }
   });
 
