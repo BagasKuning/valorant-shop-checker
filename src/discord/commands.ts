@@ -5,7 +5,7 @@ import {
   type ChatInputCommandInteraction,
   type Client,
 } from 'discord.js';
-import { configCheckLabel, fetchShop, formatDuration, matchesWishlist, probePd, shardLabel } from '../riot/store';
+import { configCheckLabel, fetchShop, formatDuration, matchesWishlist, probePd, shardLabel, youtubeSearchUrl, type ShopItem } from '../riot/store';
 import { deleteUser, getUser, loadUsers, upsertUser } from '../storage';
 import { SSID_HOWTO, startLogin } from './loginFlow';
 
@@ -35,30 +35,46 @@ export const commands = [
   new SlashCommandBuilder().setName('help').setDescription('Cara pakai bot Valorant Shop Checker'),
 ].map((c) => c.toJSON());
 
-function shopEmbed(riotName: string, tag: string, shop: Awaited<ReturnType<typeof fetchShop>>): EmbedBuilder | null {
-  if ('error' in shop) return null;
+/** Satu embed per skin, lengkap dengan gambar + link YouTube. */
+function itemEmbed(
+  it: ShopItem,
+  opts: { nightMarket?: boolean; footer?: string },
+): EmbedBuilder {
+  const price =
+    opts.nightMarket && it.discountVp !== null && it.discountVp !== undefined
+      ? `~~${it.vp ?? '?'} VP~~ **${it.discountVp} VP** (diskon)`
+      : it.vp !== null
+        ? `**${it.vp} VP**`
+        : 'harga tidak tersedia';
   const embed = new EmbedBuilder()
-    .setTitle(`Daily Shop — ${riotName}#${tag}`)
+    .setTitle(it.name)
     .setColor(0xff4655)
-    .setDescription(
-      shop.shop.items.length === 0
-        ? 'Shop hari ini kosong / tidak bisa dibaca. Coba lagi sebentar lagi.'
-        : shop.shop.items
-            .map((it, i) => `${i + 1}. **${it.name}** — ${it.vp !== null ? `${it.vp} VP` : 'harga tidak tersedia'}`)
-            .join('\n'),
-    )
-    .setFooter({ text: `Reset dalam ${formatDuration(shop.shop.secondsLeft)} • Cek tiap hari ${configCheckLabel()} buat wishlist` });
-  if (shop.shop.nightMarket.length > 0) {
-    embed.addFields({
-      name: 'Night Market',
-      value: shop.shop.nightMarket
-        .map((it) => `• **${it.name}** — ${it.discountVp !== null ? `${it.discountVp} VP (diskon)` : it.vp !== null ? `${it.vp} VP` : '?'}`)
-        .join('\n'),
-    });
-  }
-  const firstIcon = shop.shop.items[0]?.icon;
-  if (firstIcon) embed.setThumbnail(firstIcon);
+    .setDescription(`${price}\n[Lihat di YouTube](${youtubeSearchUrl(it.name)})`);
+  if (it.icon) embed.setImage(it.icon);
+  if (opts.footer) embed.setFooter({ text: opts.footer });
   return embed;
+}
+
+function shopEmbeds(riotName: string, tag: string, shop: Awaited<ReturnType<typeof fetchShop>>): EmbedBuilder[] | null {
+  if ('error' in shop) return null;
+  const footer = `Daily Shop — ${riotName}#${tag} • Reset dalam ${formatDuration(shop.shop.secondsLeft)} • Cek tiap hari ${configCheckLabel()} buat wishlist`;
+  const embeds: EmbedBuilder[] = [];
+  if (shop.shop.items.length === 0 && shop.shop.nightMarket.length === 0) {
+    embeds.push(
+      new EmbedBuilder()
+        .setTitle(`Daily Shop — ${riotName}#${tag}`)
+        .setColor(0xff4655)
+        .setDescription('Shop hari ini kosong / tidak bisa dibaca. Coba lagi sebentar lagi.')
+        .setFooter({ text: footer }),
+    );
+    return embeds;
+  }
+  for (const it of shop.shop.items) embeds.push(itemEmbed(it, {}));
+  for (const it of shop.shop.nightMarket) {
+    embeds.push(itemEmbed(it, { nightMarket: true }));
+  }
+  embeds[embeds.length - 1]?.setFooter({ text: footer });
+  return embeds;
 }
 
 export async function handleCommand(
@@ -110,12 +126,12 @@ export async function handleCommand(
           await interaction.editReply('Sesi Riot kamu sudah habis. Ketik `/login` lagi ya (cuma sekali).');
           return;
         }
-        const embed = shopEmbed(user.riotName, user.tag, result);
-        if (!embed) {
+        const embeds = shopEmbeds(user.riotName, user.tag, result);
+        if (!embeds) {
           await interaction.editReply('Shop tidak bisa dibaca. Coba lagi sebentar lagi.');
           return;
         }
-        await interaction.editReply({ embeds: [embed] });
+        await interaction.editReply({ embeds });
       } catch (err) {
         await interaction.editReply(`Gagal ambil shop: ${(err as Error).message}`);
       }

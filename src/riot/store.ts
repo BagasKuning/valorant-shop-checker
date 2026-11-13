@@ -41,10 +41,20 @@ export async function getSkinCatalog(): Promise<Map<string, SkinCatalogEntry>> {
 }
 
 function mapOffer(
-  offer: { OfferID?: string; Cost?: Record<string, number> },
+  offer: {
+    OfferID?: string;
+    Cost?: Record<string, number>;
+    Rewards?: Array<{ ItemID?: string }>;
+  },
   catalog: Map<string, SkinCatalogEntry>,
 ): ShopItem {
-  const uuid = offer.OfferID ?? '';
+  // Di v2, OfferID adalah UUID skin-nya. Di v3, OfferID bisa jadi UUID
+  // offer-nya sendiri (bukan skin) — UUID skin-nya ada di Rewards[0].ItemID.
+  // Pakai yang ketemu di katalog; kalau dua-duanya tidak ada, pakai OfferID.
+  const candidates = [offer.OfferID, offer.Rewards?.[0]?.ItemID].filter(
+    (c): c is string => !!c,
+  );
+  const uuid = candidates.find((c) => catalog.has(c)) ?? offer.OfferID ?? '';
   const entry = catalog.get(uuid);
   return {
     uuid,
@@ -52,6 +62,11 @@ function mapOffer(
     icon: entry?.displayIcon ?? null,
     vp: offer.Cost?.[VP_CURRENCY_ID] ?? null,
   };
+}
+
+/** Link pencarian YouTube buat satu skin, misal buat lihat showcase-nya. */
+export function youtubeSearchUrl(skinName: string): string {
+  return `https://www.youtube.com/results?search_query=${encodeURIComponent(`${skinName} Valorant skin`)}`;
 }
 
 export function parseStorefront(raw: unknown, catalog: Map<string, SkinCatalogEntry>): ShopResult {
@@ -70,7 +85,14 @@ export function parseStorefront(raw: unknown, catalog: Map<string, SkinCatalogEn
     FeaturedBundle?: { Bundle?: { DisplayName?: string } };
   };
   const panel = d.SkinsPanelLayout;
-  const items = (panel?.SingleItemStoreOffers ?? []).map((o) => mapOffer(o, catalog));
+  let items = (panel?.SingleItemStoreOffers ?? []).map((o) => mapOffer(o, catalog));
+  // Kalau SingleItemStoreOffers kosong tapi SingleItemOffers ada isinya,
+  // tampilkan skin-nya dari daftar itu (tanpa harga).
+  if (items.length === 0 && (panel?.SingleItemOffers?.length ?? 0) > 0) {
+    items = (panel?.SingleItemOffers ?? []).map((id) =>
+      mapOffer({ OfferID: id }, catalog),
+    );
+  }
   const nightMarket = (d.BonusStore?.BonusStoreOffers ?? []).map((b) => {
     const item = mapOffer(b.Offer ?? {}, catalog);
     return { ...item, discountVp: b.DiscountCosts?.[VP_CURRENCY_ID] ?? null };
